@@ -2,9 +2,9 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-import { DEFAULT_CHAT_ROOM } from "@/lib/chat";
 import { useRealtime } from "@/lib/realtime-app";
 import type { RealtimeEnvelope } from "@/lib/realtime";
+import { DEFAULT_CHAT_ROOM } from "@/lib/chat";
 
 type HistoryResponse = {
   channel: string;
