@@ -1,36 +1,79 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Realtime Chat (Next.js + Redis Pub/Sub)
 
-## Getting Started
+This project implements a realtime chat using:
 
-First, run the development server:
+- Next.js App Router
+- Redis Pub/Sub (compatible with Upstash Redis TCP endpoint)
+- Server-Sent Events (SSE) for realtime delivery
+
+## Quick Start
+
+1. Copy env file:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2. Set `REDIS_URL` in `.env.local`:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```env
+REDIS_URL="rediss://default:<password>@<your-upstash-redis-host>:<port>"
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+3. Run:
 
-## Learn More
+```bash
+npm install
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+4. Open [http://localhost:3000](http://localhost:3000)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Architecture
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### Flow
 
-## Deploy on Vercel
+1. User sends a message from the client (`ChatClient`).
+2. Client calls `POST /api/chat/messages`.
+3. API route validates payload, writes to Redis list (history), and publishes to Redis channel.
+4. Each connected browser has an open `EventSource` to `GET /api/chat/stream`.
+5. Stream route subscribes to Redis channel and forwards each publish as SSE event to the client.
+6. Client appends messages in real time.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Why this structure
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **Redis Pub/Sub** gives low-latency fan-out to all subscribers.
+- **SSE** is lightweight and perfect for one-way server -> client updates like chat timeline.
+- **History list** in Redis solves the “new user joins and sees old messages” problem.
+- **Split routes** (`messages` vs `stream`) keeps write and read-stream responsibilities clean.
+
+## Project Structure
+
+```txt
+src/
+  app/
+    api/chat/messages/route.ts   # GET history + POST publish
+    api/chat/stream/route.ts     # SSE endpoint backed by Redis subscribe
+    chat-client.tsx              # Client UI + EventSource connection
+    page.tsx                     # Renders chat client
+  lib/
+    chat.ts                      # Shared chat types, limits, validation helpers
+    redis.ts                     # Redis connection helpers (publisher/subscriber)
+```
+
+## Endpoints
+
+- `GET /api/chat/messages?room=general`
+  - Returns last 50 messages for a room.
+- `POST /api/chat/messages`
+  - Body: `{ room, user, text }`
+  - Saves + publishes one message.
+- `GET /api/chat/stream?room=general`
+  - Opens SSE stream.
+  - Emits `ready`, `message`, and `error` events.
+
+## Notes for Upstash
+
+- Use the Redis TCP URL (`rediss://...`) so `ioredis` can subscribe/publish.
+- If deployed behind a reverse proxy (e.g., Nginx), disable buffering for SSE.
+- For large scale, you can move presence/typing to separate channels.
