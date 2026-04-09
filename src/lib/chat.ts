@@ -7,6 +7,8 @@ export const MAX_ROOM_LENGTH = 64;
 export type ChatMessage = {
   id: string;
   room: string;
+  channel: string;
+  event: string;
   user: string;
   text: string;
   createdAt: string;
@@ -14,6 +16,8 @@ export type ChatMessage = {
 
 type ChatPayload = {
   room: string;
+  channel: string;
+  event: string;
   user: string;
   text: string;
 };
@@ -36,9 +40,20 @@ export function normalizeRoom(rawRoom: unknown): string {
 
 export function parsePayload(input: unknown): ChatPayload {
   const source = input as Record<string, unknown>;
-  const room = normalizeRoom(source?.room);
+  const channelInput = cleanString(source?.channel);
+  const room = normalizeRoom(source?.room || channelInput);
+  const channel = toRedisChannel(room);
+  const event = cleanString(source?.event) || "chat.message";
   const user = cleanString(source?.user).slice(0, MAX_USERNAME_LENGTH);
-  const text = cleanString(source?.text).slice(0, MAX_MESSAGE_LENGTH);
+
+  let text = cleanString(source?.text).slice(0, MAX_MESSAGE_LENGTH);
+  if (!text && typeof source?.data === "string") {
+    text = cleanString(source.data).slice(0, MAX_MESSAGE_LENGTH);
+  }
+  if (!text && typeof source?.data === "object" && source?.data !== null) {
+    const data = source.data as Record<string, unknown>;
+    text = cleanString(data.text).slice(0, MAX_MESSAGE_LENGTH);
+  }
 
   if (!user) {
     throw new Error("Username is required.");
@@ -48,7 +63,7 @@ export function parsePayload(input: unknown): ChatPayload {
     throw new Error("Message text is required.");
   }
 
-  return { room, user, text };
+  return { room, channel, event, user, text };
 }
 
 export function toRedisChannel(room: string): string {

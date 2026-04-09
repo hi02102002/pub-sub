@@ -2,11 +2,13 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-import { DEFAULT_CHAT_ROOM, type ChatMessage } from "@/lib/chat";
+import { DEFAULT_CHAT_ROOM } from "@/lib/chat";
+import { useRealtime } from "@/lib/realtime-app";
+import type { RealtimeEnvelope } from "@/lib/realtime";
 
 type HistoryResponse = {
-  room: string;
-  messages: ChatMessage[];
+  channel: string;
+  messages: Array<RealtimeEnvelope<{ "chat.message": { user: string; text: string } }>>;
   error?: string;
 };
 
@@ -21,18 +23,15 @@ export function ChatClient() {
   const [room, setRoom] = useState(DEFAULT_CHAT_ROOM);
   const [user, setUser] = useState("guest");
   const [text, setText] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [status, setStatus] = useState("connecting");
+  const [messages, setMessages] = useState<HistoryResponse["messages"]>([]);
+  const [status, setStatus] = useState("ready");
   const [error, setError] = useState<string | null>(null);
 
   const roomParam = useMemo(() => room.trim().toLowerCase() || DEFAULT_CHAT_ROOM, [room]);
 
   useEffect(() => {
-    let eventSource: EventSource | null = null;
-    let closed = false;
-
     async function loadHistory() {
-      const response = await fetch(`/api/chat/messages?room=${encodeURIComponent(roomParam)}`);
+      const response = await fetch(`/api/history?channel=${encodeURIComponent(roomParam)}`);
       const data = (await response.json()) as HistoryResponse;
 
       if (!response.ok || data.error) {
@@ -42,43 +41,35 @@ export function ChatClient() {
       setMessages(data.messages);
     }
 
-    async function connect() {
-      try {
-        setError(null);
-        setStatus("loading-history");
-        await loadHistory();
-
-        if (closed) return;
-
-        setStatus("connecting");
-        eventSource = new EventSource(`/api/chat/stream?room=${encodeURIComponent(roomParam)}`);
-
-        eventSource.addEventListener("ready", () => {
-          setStatus("connected");
-        });
-
-        eventSource.addEventListener("message", (event) => {
-          const payload = JSON.parse(event.data) as ChatMessage;
-          setMessages((current) => [...current, payload].slice(-50));
-        });
-
-        eventSource.addEventListener("error", () => {
-          setStatus("reconnecting");
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Connection failed.";
-        setError(message);
-        setStatus("error");
-      }
-    }
-
-    connect();
-
-    return () => {
-      closed = true;
-      eventSource?.close();
-    };
+    loadHistory().catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : "Connection failed.";
+      setError(message);
+      setStatus("error");
+    });
   }, [roomParam]);
+
+  useRealtime({
+    channel: roomParam,
+    events: ["chat.message"],
+    onData({ data, event, channel, createdAt }) {
+      setStatus("connected");
+      setMessages((current) =>
+        [
+          ...current,
+          {
+            id: `${event}-${Date.now()}`,
+            channel,
+            event,
+            data,
+            createdAt: createdAt || new Date().toISOString(),
+          },
+        ].slice(-50),
+      );
+    },
+    onError() {
+      setStatus("reconnecting");
+    },
+  });
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -89,13 +80,15 @@ export function ChatClient() {
 
     if (!trimmedText) return;
 
-    const response = await fetch("/api/chat/messages", {
+    const response = await fetch("/api/notify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        room: roomParam,
+        channel: roomParam,
         user: trimmedUser || "guest",
-        text: trimmedText,
+        data: {
+          text: trimmedText,
+        },
       }),
     });
 
@@ -143,10 +136,10 @@ export function ChatClient() {
           {messages.map((message) => (
             <li key={message.id} className="rounded bg-zinc-100 p-2 dark:bg-zinc-900">
               <div className="text-xs text-zinc-600 dark:text-zinc-300">
-                {message.room} - {toTime(message.createdAt)}
+                {message.channel} - {toTime(message.createdAt)}
               </div>
-              <div className="font-medium">{message.user}</div>
-              <p>{message.text}</p>
+              <div className="font-medium">{message.data.user}</div>
+              <p>{message.data.text}</p>
             </li>
           ))}
           {messages.length === 0 ? (
