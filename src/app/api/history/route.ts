@@ -12,7 +12,7 @@ export async function GET(request: Request) {
       .trim()
       .toLowerCase();
 
-    const messages = await realtime.history(channel, 50);
+    const messages = await realtime.channel(channel).history({ limit: 50 });
     return NextResponse.json({ channel, messages });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load history.";

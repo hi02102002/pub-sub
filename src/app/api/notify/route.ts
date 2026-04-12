@@ -22,11 +22,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Message text is required." }, { status: 400 });
     }
 
-    const message = await realtime.emit(
-      "chat.message",
-      { user, text },
-      { channel },
-    );
+    const message = await realtime.channel(channel).emit("chat.message", {
+      user,
+      text,
+    });
 
     return NextResponse.json({ ok: true, data: message }, { status: 201 });
   } catch (error) {

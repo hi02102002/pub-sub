@@ -1,72 +1,242 @@
 "use client";
 
-import { createContext, ReactNode, useContext, useEffect } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
+import type {
+  EventData,
+  EventName,
+  HistoryOptions,
+  RealtimeSchemaNode,
+} from "@/lib/realtime";
+
+export type ConnectionStatus =
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "error";
 
 type RealtimeConfig = {
-  endpoint: string;
+  api: {
+    url: string;
+    withCredentials: boolean;
+  };
+  maxReconnectAttempts: number;
 };
 
-type OnDataPayload<TEvent extends string, TData> = {
+type RealtimeProviderProps = {
+  children: ReactNode;
+  api?: Partial<RealtimeConfig["api"]>;
+  maxReconnectAttempts?: number;
+};
+
+type OnDataPayload<
+  TSchema extends RealtimeSchemaNode,
+  TEvent extends EventName<TSchema>,
+> = {
+  id?: string;
   event: TEvent;
-  data: TData;
+  data: EventData<TSchema, TEvent>;
   channel: string;
   createdAt?: string;
 };
 
-const RealtimeContext = createContext<RealtimeConfig>({
-  endpoint: "/api/realtime",
-});
+type UseRealtimeInput<
+  TSchema extends RealtimeSchemaNode,
+  TEvent extends EventName<TSchema>,
+> = {
+  enabled?: boolean;
+  channels?: string[];
+  events: TEvent[];
+  history?: boolean | HistoryOptions;
+  onData: (payload: OnDataPayload<TSchema, TEvent>) => void;
+  onError?: (error: Event) => void;
+};
 
-export function RealtimeProvider({ children }: { children: ReactNode }) {
+const defaultConfig: RealtimeConfig = {
+  api: {
+    url: "/api/realtime",
+    withCredentials: false,
+  },
+  maxReconnectAttempts: 3,
+};
+
+const RealtimeContext = createContext<RealtimeConfig>(defaultConfig);
+
+function normalizeChannel(channel?: string): string {
+  return (channel || "default").trim().toLowerCase() || "default";
+}
+
+function appendHistory(search: URLSearchParams, history?: boolean | HistoryOptions) {
+  if (!history) return;
+
+  search.set("history", "1");
+
+  if (history === true) return;
+
+  if (typeof history.limit === "number") {
+    search.set("history_limit", String(history.limit));
+  }
+
+  if (typeof history.start === "number") {
+    search.set("history_start", String(history.start));
+  }
+
+  if (typeof history.end === "number") {
+    search.set("history_end", String(history.end));
+  }
+}
+
+export function RealtimeProvider({
+  children,
+  api,
+  maxReconnectAttempts,
+}: RealtimeProviderProps) {
   return (
-    <RealtimeContext.Provider value={{ endpoint: "/api/realtime" }}>
+    <RealtimeContext.Provider
+      value={{
+        api: {
+          url: api?.url || defaultConfig.api.url,
+          withCredentials: api?.withCredentials ?? defaultConfig.api.withCredentials,
+        },
+        maxReconnectAttempts:
+          maxReconnectAttempts ?? defaultConfig.maxReconnectAttempts,
+      }}
+    >
       {children}
     </RealtimeContext.Provider>
   );
 }
 
-type BaseEventMap = Record<string, unknown>;
-
-export function createRealtime<TEvents extends BaseEventMap>() {
-  function useRealtime<TEvent extends keyof TEvents & string>(input: {
-    channel?: string;
-    events: TEvent[];
-    onData: (payload: OnDataPayload<TEvent, TEvents[TEvent]>) => void;
-    onError?: (error: Event) => void;
-  }) {
-    const { endpoint } = useContext(RealtimeContext);
-    const channel = (input.channel || "general").trim().toLowerCase();
-    const eventsParam = input.events.join(",");
-    const { onData, onError } = input;
+export function createRealtime<TSchema extends RealtimeSchemaNode>() {
+  function useRealtime<TEvent extends EventName<TSchema>>(
+    input: UseRealtimeInput<TSchema, TEvent>,
+  ) {
+    const { api, maxReconnectAttempts } = useContext(RealtimeContext);
+    const [status, setStatus] = useState<ConnectionStatus>(
+      input.enabled === false ? "disconnected" : "connecting",
+    );
+    const onDataRef = useRef(input.onData);
+    const onErrorRef = useRef(input.onError);
+    const historyReplayRef = useRef(new Set<string>());
 
     useEffect(() => {
-      const url = `${endpoint}?channel=${encodeURIComponent(channel)}&events=${encodeURIComponent(eventsParam)}`;
-      const source = new EventSource(url);
+      onDataRef.current = input.onData;
+    }, [input.onData]);
 
-      for (const eventName of input.events) {
-        source.addEventListener(eventName, (event) => {
-          const payload = JSON.parse((event as MessageEvent).data) as {
-            event: TEvent;
-            data: TEvents[TEvent];
-            channel: string;
-            createdAt?: string;
-          };
+    useEffect(() => {
+      onErrorRef.current = input.onError;
+    }, [input.onError]);
 
-          onData({
-            event: payload.event,
-            data: payload.data,
-            channel: payload.channel,
-            createdAt: payload.createdAt,
-          });
-        });
+    const enabled = input.enabled ?? true;
+    const channels = (input.channels ?? ["default"]).map(normalizeChannel);
+    const channelsKey = channels.join(",");
+    const eventsKey = input.events.join(",");
+    const historyKey =
+      typeof input.history === "object"
+        ? JSON.stringify(input.history)
+        : String(Boolean(input.history));
+
+    useEffect(() => {
+      if (!enabled) {
+        return;
       }
 
-      source.addEventListener("error", (event) => {
-        onError?.(event);
+      const eventNames = eventsKey ? (eventsKey.split(",") as TEvent[]) : [];
+      const search = new URLSearchParams();
+      const replayKey = `${channelsKey}:${eventsKey}:${historyKey}`;
+      const history =
+        input.history && !historyReplayRef.current.has(replayKey)
+          ? input.history
+          : undefined;
+
+      if (history) {
+        historyReplayRef.current.add(replayKey);
+      }
+
+      search.set("channels", channelsKey);
+      search.set("events", eventsKey);
+      appendHistory(search, history);
+
+      let attempts = 0;
+      let active = true;
+
+      const eventSource = new EventSource(`${api.url}?${search.toString()}`, {
+        withCredentials: api.withCredentials,
       });
 
-      return () => source.close();
-    }, [channel, endpoint, eventsParam, input.events, onData, onError]);
+      const onOpen = () => {
+        attempts = 0;
+        if (active) {
+          setStatus("connected");
+        }
+      };
+
+      const onMessage = (event: Event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent<string>).data) as OnDataPayload<
+            TSchema,
+            TEvent
+          >;
+          onDataRef.current(payload);
+        } catch {
+          setStatus("error");
+        }
+      };
+
+      const onError = (event: Event) => {
+        onErrorRef.current?.(event);
+
+        if (!active) {
+          return;
+        }
+
+        attempts += 1;
+        if (attempts >= maxReconnectAttempts) {
+          setStatus("error");
+          eventSource.close();
+          return;
+        }
+
+        setStatus("connecting");
+      };
+
+      eventSource.addEventListener("open", onOpen);
+      eventSource.addEventListener("ready", onOpen);
+      eventSource.addEventListener("error", onError);
+
+      for (const eventName of eventNames) {
+        eventSource.addEventListener(eventName, onMessage);
+      }
+
+      return () => {
+        active = false;
+        eventSource.removeEventListener("open", onOpen);
+        eventSource.removeEventListener("ready", onOpen);
+        eventSource.removeEventListener("error", onError);
+        for (const eventName of eventNames) {
+          eventSource.removeEventListener(eventName, onMessage);
+        }
+        eventSource.close();
+      };
+    }, [
+      api.url,
+      api.withCredentials,
+      channelsKey,
+      enabled,
+      eventsKey,
+      historyKey,
+      input.history,
+      maxReconnectAttempts,
+    ]);
+
+    return { status: enabled ? status : "disconnected" };
   }
 
   return { useRealtime };

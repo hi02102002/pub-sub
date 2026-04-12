@@ -1,16 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 
 import { useRealtime } from "@/lib/realtime-app";
-import type { RealtimeEnvelope } from "@/lib/realtime";
+import type { RealtimeEnvelope, RealtimeEvents } from "@/lib/realtime";
 import { DEFAULT_CHAT_ROOM } from "@/lib/chat";
-
-type HistoryResponse = {
-  channel: string;
-  messages: Array<RealtimeEnvelope<{ "chat.message": { user: string; text: string } }>>;
-  error?: string;
-};
 
 function toTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], {
@@ -23,41 +17,24 @@ export function ChatClient() {
   const [room, setRoom] = useState(DEFAULT_CHAT_ROOM);
   const [user, setUser] = useState("guest");
   const [text, setText] = useState("");
-  const [messages, setMessages] = useState<HistoryResponse["messages"]>([]);
-  const [status, setStatus] = useState("ready");
+  const [messages, setMessages] = useState<Array<RealtimeEnvelope<RealtimeEvents, "chat.message">>>(
+    [],
+  );
   const [error, setError] = useState<string | null>(null);
 
   const roomParam = useMemo(() => room.trim().toLowerCase() || DEFAULT_CHAT_ROOM, [room]);
 
-  useEffect(() => {
-    async function loadHistory() {
-      const response = await fetch(`/api/history?channel=${encodeURIComponent(roomParam)}`);
-      const data = (await response.json()) as HistoryResponse;
-
-      if (!response.ok || data.error) {
-        throw new Error(data.error || "Unable to load message history.");
-      }
-
-      setMessages(data.messages);
-    }
-
-    loadHistory().catch((err: unknown) => {
-      const message = err instanceof Error ? err.message : "Connection failed.";
-      setError(message);
-      setStatus("error");
-    });
-  }, [roomParam]);
-
-  useRealtime({
-    channel: roomParam,
+  const { status } = useRealtime({
+    channels: [roomParam],
     events: ["chat.message"],
-    onData({ data, event, channel, createdAt }) {
-      setStatus("connected");
+    history: { limit: 50 },
+    onData({ id, data, event, channel, createdAt }) {
+      setError(null);
       setMessages((current) =>
         [
           ...current,
           {
-            id: `${event}-${Date.now()}`,
+            id: id || `${event}-${Date.now()}`,
             channel,
             event,
             data,
@@ -67,7 +44,7 @@ export function ChatClient() {
       );
     },
     onError() {
-      setStatus("reconnecting");
+      setError("Realtime connection issue.");
     },
   });
 
@@ -115,7 +92,11 @@ export function ChatClient() {
           Room
           <input
             value={room}
-            onChange={(event) => setRoom(event.target.value)}
+            onChange={(event) => {
+              setRoom(event.target.value);
+              setMessages([]);
+              setError(null);
+            }}
             className="rounded-md border border-zinc-300 bg-transparent px-3 py-2 outline-none focus:ring-2 focus:ring-zinc-400"
             placeholder="general"
           />
